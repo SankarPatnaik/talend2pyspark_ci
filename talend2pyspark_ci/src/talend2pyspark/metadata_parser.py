@@ -3,6 +3,8 @@ import os
 import xml.etree.ElementTree as ET
 import json
 
+from pyspark.sql import functions as F
+
 # Component Mapping
 COMPONENT_MAPPING = {
     "tFileInputDelimited": "read_csv",
@@ -11,6 +13,7 @@ COMPONENT_MAPPING = {
     "tFilterRow": "filter",
     "tAggregateRow": "aggregate",
     "tJoin": "join",
+    "tMap": "map",
     "tFileOutputDelimited": "write_csv",
     "tFileOutputParquet": "write_parquet"
 }
@@ -48,11 +51,20 @@ def extract_talend_metadata(jar_path, output_dir="talend_job_extracted"):
                     for comp in root_el.findall(".//node"):
                         component_name = comp.attrib.get("componentName")
                         component_id = comp.attrib.get("id")
-                        component = {"id": component_id, "name": component_name, "properties": {}}
+                        component = {"id": component_id, "name": component_name, "properties": {}, "mappings": []}
+
                         for elem in comp.findall("elementParameter"):
                             key = elem.attrib.get("name")
                             value = elem.attrib.get("value")
                             component["properties"][key] = value
+
+                        # Extract mappings (specific to tMap)
+                        for out_map in comp.findall(".//mapperTableEntries"):
+                            out_col = out_map.attrib.get("name")
+                            expr = out_map.attrib.get("expression")
+                            if out_col and expr:
+                                component["mappings"].append({"output": out_col, "expr": expr})
+
                         metadata["components"].append(component)
                 except Exception as e:
                     print(f"[WARN] Could not parse {xml_path}: {e}")
@@ -65,38 +77,40 @@ def extract_talend_metadata(jar_path, output_dir="talend_job_extracted"):
     return metadata
 
 
+def translate_expression(expr):
+    """
+    Very simple translator: Talend expression → PySpark expression string.
+    This can be extended.
+    """
+    if "?" in expr and ":" in expr:  # ternary operator
+        condition, rest = expr.split("?", 1)
+        true_val, false_val = rest.split(":", 1)
+        return f"F.when({condition.strip()}, {true_val.strip()}).otherwise({false_val.strip()})"
+    return expr  # return as-is (can be improved)
+
+
 def generate_pyspark_code(metadata, output_file="generated_pyspark_job.py"):
-    """ Step 2: Convert Talend metadata → PySpark skeleton """
+    """ Step 2+3: Convert Talend metadata → PySpark skeleton with tMap support """
     code_lines = [
         "from pyspark.sql import SparkSession",
+        "from pyspark.sql import functions as F",
         "",
         "spark = SparkSession.builder.appName('TalendJob_Migrated').getOrCreate()",
         ""
     ]
 
     df_counter = 1
-    df_map = {}  # maps component id → dataframe variable
+    df_map = {}
 
     for comp in metadata["components"]:
         comp_name = comp["name"]
         props = comp["properties"]
+        mappings = comp.get("mappings", [])
         action = COMPONENT_MAPPING.get(comp_name)
 
         if action == "read_csv":
             path = props.get("FILE_NAME", "/path/to/input.csv")
             code_lines.append(f"df{df_counter} = spark.read.option('header','true').csv('{path}')")
-            df_map[comp["id"]] = f"df{df_counter}"
-            df_counter += 1
-
-        elif action == "read_json":
-            path = props.get("FILE_NAME", "/path/to/input.json")
-            code_lines.append(f"df{df_counter} = spark.read.json('{path}')")
-            df_map[comp["id"]] = f"df{df_counter}"
-            df_counter += 1
-
-        elif action == "read_parquet":
-            path = props.get("FILE_NAME", "/path/to/input.parquet")
-            code_lines.append(f"df{df_counter} = spark.read.parquet('{path}')")
             df_map[comp["id"]] = f"df{df_counter}"
             df_counter += 1
 
@@ -107,10 +121,15 @@ def generate_pyspark_code(metadata, output_file="generated_pyspark_job.py"):
             df_map[comp["id"]] = f"df{df_counter}"
             df_counter += 1
 
-        elif action == "write_csv":
-            path = props.get("FILE_NAME", "/path/to/output.csv")
+        elif action == "map":
             last_df = f"df{df_counter-1}"
-            code_lines.append(f"{last_df}.write.mode('overwrite').csv('{path}')")
+            code_lines.append(f"df{df_counter} = {last_df}")
+            for m in mappings:
+                out_col = m["output"]
+                expr = translate_expression(m["expr"])
+                code_lines.append(f"df{df_counter} = df{df_counter}.withColumn('{out_col}', {expr})")
+            df_map[comp["id"]] = f"df{df_counter}"
+            df_counter += 1
 
         elif action == "write_parquet":
             path = props.get("FILE_NAME", "/path/to/output.parquet")
@@ -131,6 +150,6 @@ def generate_pyspark_code(metadata, output_file="generated_pyspark_job.py"):
 
 # Example usage
 if __name__ == "__main__":
-    jar_file = "my_talend_job.jar"  # Replace with actual Talend JAR
+    jar_file = "my_talend_job.jar"
     metadata = extract_talend_metadata(jar_file)
     generate_pyspark_code(metadata)
