@@ -1,0 +1,7 @@
+{
+  "steps": [
+    {"type": "tMap", "expr": "row1.col1+row1.col2"},
+    {"type": "tJoin", "keys": ["id"]},
+    {"type": "tAggregateRow", "group": "category", "agg": "sum(amount)"}
+  ]
+}

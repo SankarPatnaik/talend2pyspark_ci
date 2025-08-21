@@ -1,0 +1,10 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "talend2pyspark"
+version = "0.1.0"
+description = "Talend to PySpark converter"
+authors = [{ name = "Your Name" }]
+requires-python = ">=3.9"
